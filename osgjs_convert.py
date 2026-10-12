@@ -735,9 +735,7 @@ def _walk_geometries(node: Any, out: list[dict], *, _seen: Optional[set] = None)
 
 def _extract_diffuse_texture(geom: dict) -> Optional[str]:
     """Return texture File path from StateSet if present."""
-    ss = geom.get("StateSet") or {}
-    if "osg.StateSet" in ss:
-        ss = ss["osg.StateSet"]
+    ss = _stateset(geom)
     tal = ss.get("TextureAttributeList") or []
     for unit in tal:
         if not isinstance(unit, list):
@@ -753,12 +751,9 @@ def _extract_diffuse_texture(geom: dict) -> Optional[str]:
 
 
 def _extract_material_name(geom: dict, fallback: str) -> str:
-    ss = geom.get("StateSet") or {}
-    if "osg.StateSet" in ss:
-        ss = ss["osg.StateSet"]
-    for entry in ss.get("AttributeList") or []:
+    for entry in _stateset(geom).get("AttributeList") or []:
         if isinstance(entry, dict) and "osg.Material" in entry:
-            mat = entry["osg.Material"]
+            mat = _resolve("osg.Material", entry["osg.Material"])
             if mat.get("Name"):
                 return str(mat["Name"])
     return fallback
@@ -835,14 +830,47 @@ def _filter_tris(indices: list[int], n_verts: int) -> list[int]:
     return out
 
 
-def _material_info(g: dict) -> tuple[Optional[Any], str]:
-    """(osg.Material UniqueID, name) from a geometry's StateSet."""
+# OSGJS writes an object once and refers to it later as {"UniqueID": n} only
+# (many geometries share a StateSet/Material). Resolve those references.
+_OBJ_REGISTRY: dict = {}
+
+
+def _build_registry(scene: Any) -> dict:
+    reg: dict = {}
+
+    def walk(n: Any) -> None:
+        if isinstance(n, dict):
+            for k, v in n.items():
+                if k in ("osg.StateSet", "osg.Material") and isinstance(v, dict) and len(v) > 1 and "UniqueID" in v:
+                    reg.setdefault((k, str(v["UniqueID"])), v)
+                walk(v)
+        elif isinstance(n, list):
+            for v in n:
+                walk(v)
+
+    walk(scene)
+    return reg
+
+
+def _resolve(kind: str, obj: Any) -> Any:
+    if isinstance(obj, dict) and set(obj) == {"UniqueID"}:
+        return _OBJ_REGISTRY.get((kind, str(obj["UniqueID"])), obj)
+    return obj
+
+
+def _stateset(g: dict) -> dict:
     ss = g.get("StateSet") or {}
     if "osg.StateSet" in ss:
         ss = ss["osg.StateSet"]
-    for entry in ss.get("AttributeList") or []:
+    ss = _resolve("osg.StateSet", ss)
+    return ss if isinstance(ss, dict) else {}
+
+
+def _material_info(g: dict) -> tuple[Optional[Any], str]:
+    """(osg.Material UniqueID, name) from a geometry's StateSet."""
+    for entry in _stateset(g).get("AttributeList") or []:
         if isinstance(entry, dict) and "osg.Material" in entry:
-            mat = entry["osg.Material"]
+            mat = _resolve("osg.Material", entry["osg.Material"])
             return mat.get("UniqueID"), str(mat.get("Name") or "")
     return None, ""
 
@@ -977,6 +1005,8 @@ def convert_osgjs(
         raise FileNotFoundError(f"No file.osgjs in {work_dir}")
 
     scene = json.loads(osgjs_path.read_text(encoding="utf-8"))
+    global _OBJ_REGISTRY
+    _OBJ_REGISTRY = _build_registry(scene)
     bins = _load_bins(work_dir)
     if not bins:
         raise FileNotFoundError("No .bin buffers next to file.osgjs")

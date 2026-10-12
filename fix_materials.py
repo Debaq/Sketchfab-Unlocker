@@ -58,13 +58,33 @@ def _osgjs_material_names(osgjs: Path) -> list[str]:
     names_by_id: dict[int, str] = {}
     order: list[int] = []
 
+    # StateSets/Materials repeat as {"UniqueID": n} references; resolve them
+    registry: dict = {}
+
+    def collect(n: Any) -> None:
+        if isinstance(n, dict):
+            for k, v in n.items():
+                if k in ("osg.StateSet", "osg.Material") and isinstance(v, dict) and len(v) > 1 and "UniqueID" in v:
+                    registry.setdefault((k, str(v["UniqueID"])), v)
+                collect(v)
+        elif isinstance(n, list):
+            for v in n:
+                collect(v)
+
+    def resolve(kind: str, obj: Any) -> Any:
+        if isinstance(obj, dict) and set(obj) == {"UniqueID"}:
+            return registry.get((kind, str(obj["UniqueID"])), obj)
+        return obj
+
+    collect(data)
+
     def visit_stateset(ss: Any) -> None:
         if not isinstance(ss, dict):
             return
-        ss = ss.get("osg.StateSet", ss)
+        ss = resolve("osg.StateSet", ss.get("osg.StateSet", ss))
         for entry in ss.get("AttributeList") or []:
             if isinstance(entry, dict) and "osg.Material" in entry:
-                mat = entry["osg.Material"]
+                mat = resolve("osg.Material", entry["osg.Material"])
                 mid = mat.get("UniqueID")
                 if mat.get("Name"):
                     names_by_id.setdefault(mid, str(mat["Name"]))
@@ -284,6 +304,47 @@ class _Builder:
         return mat
 
 
+_TEXTURE_SLOTS = ("normalTexture", "occlusionTexture", "emissiveTexture")
+
+
+def _strip_textures(mat: dict) -> dict:
+    """Copy of a glTF material without texture bindings (indices may no longer exist)."""
+    out = {k: v for k, v in mat.items() if k not in _TEXTURE_SLOTS and k != "pbrMetallicRoughness"}
+    pbr = {k: v for k, v in (mat.get("pbrMetallicRoughness") or {}).items()
+           if k not in ("baseColorTexture", "metallicRoughnessTexture")}
+    if pbr:
+        out["pbrMetallicRoughness"] = pbr
+    return out
+
+
+def _has_texture(mat: dict) -> bool:
+    pbr = mat.get("pbrMetallicRoughness") or {}
+    return any(k in mat for k in _TEXTURE_SLOTS) or "baseColorTexture" in pbr or "metallicRoughnessTexture" in pbr
+
+
+def _fix_missing_texcoords(gltf: dict) -> None:
+    """Primitives without TEXCOORD_0 can't use textured materials (invalid glTF): give them an untextured copy."""
+    mats = gltf.get("materials") or []
+    clones: dict[int, int] = {}
+    for mesh in gltf.get("meshes") or []:
+        for prim in mesh.get("primitives") or []:
+            mi = prim.get("material")
+            if mi is None or "TEXCOORD_0" in (prim.get("attributes") or {}) or mi >= len(mats):
+                continue
+            if not _has_texture(mats[mi]):
+                continue
+            if mi not in clones:
+                mats.append(_strip_textures(mats[mi]))
+                clones[mi] = len(mats) - 1
+            prim["material"] = clones[mi]
+
+
+def _write_gltf(path: Path, gltf: dict) -> None:
+    tmp = path.with_suffix(".gltf.tmp")
+    tmp.write_text(json.dumps(gltf), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def apply_sketchfab_materials(
     gltf_path: Path,
     options: dict,
@@ -297,6 +358,9 @@ def apply_sketchfab_materials(
     sf_mats = _sketchfab_materials(options)
     if not sf_mats or not gltf.get("materials"):
         log("  sin materiales que enlazar")
+        if gltf.get("materials"):
+            _fix_missing_texcoords(gltf)
+            _write_gltf(gltf_path, gltf)
         return 0
 
     by_name: dict[str, dict] = {}
@@ -310,10 +374,16 @@ def apply_sketchfab_materials(
     for i, base in enumerate(gltf["materials"]):
         sf = by_name.get(names[i] or "") if i < len(names) else None
         if sf is None:
-            new_mats.append(base)
+            new_mats.append(_strip_textures(base))
             continue
         new_mats.append(builder.material(base, sf))
         linked += 1
+
+    if linked == 0:
+        log("  ningun material enlazado: el glTF se deja como esta")
+        _fix_missing_texcoords(gltf)
+        _write_gltf(gltf_path, gltf)
+        return 0
 
     gltf["materials"] = new_mats
     for key, items in (("images", builder.images), ("textures", builder.textures), ("samplers", builder.samplers)):
@@ -331,9 +401,8 @@ def apply_sketchfab_materials(
         if "KHR_materials_emissive_strength" not in used:
             used.append("KHR_materials_emissive_strength")
 
-    tmp = gltf_path.with_suffix(".gltf.tmp")
-    tmp.write_text(json.dumps(gltf), encoding="utf-8")
-    os.replace(tmp, gltf_path)
+    _fix_missing_texcoords(gltf)
+    _write_gltf(gltf_path, gltf)
 
     log(
         f"  materiales: {linked}/{len(new_mats)} enlazados (por {source}), "
