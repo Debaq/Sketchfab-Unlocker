@@ -51,6 +51,7 @@ const SETTING_FIELDS = {
   proxyHost: ["inpProxyHost", "value"],
   proxyPort: ["inpProxyPort", "value"],
   proxyUser: ["inpProxyUser", "value"],
+  apiToken: ["inpApiToken", "value"],
 };
 
 function collectSettings() {
@@ -204,6 +205,14 @@ function setupSettingsSync() {
   const passInp = document.getElementById("inpProxyPass");
   eyeBtn.addEventListener("click", () => {
     passInp.type = passInp.type === "password" ? "text" : "password";
+  });
+
+  const tokenInp = document.getElementById("inpApiToken");
+  document.getElementById("btnToggleTokenEye").addEventListener("click", () => {
+    tokenInp.type = tokenInp.type === "password" ? "text" : "password";
+  });
+  document.getElementById("btnTokenHelp").addEventListener("click", () => {
+    if (window.pywebview && window.pywebview.api) window.pywebview.api.open_url("https://sketchfab.com/settings#password");
   });
 
   document.getElementById("btnTestProxy").addEventListener("click", () => {
@@ -518,6 +527,27 @@ function renderQueue() {
   });
 }
 
+function copyText(text) {
+  // navigator.clipboard is rejected by Qt WebEngine; execCommand works from a user gesture
+  const fallback = () => {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;opacity:0;";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    ta.remove();
+    if (!ok && window.pywebview && window.pywebview.api) window.pywebview.api.copy_to_clipboard(text);
+    return ok;
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).catch(fallback);
+  }
+  fallback();
+  return Promise.resolve();
+}
+
 function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -533,11 +563,14 @@ function showItemMenu(anchor, item) {
   menu.id = "itemMenu";
   menu.style.cssText = "position:fixed;z-index:1000;background:var(--card-bg,#151922);border:1px solid var(--border-color,#252D3D);border-radius:8px;padding:4px;min-width:170px;box-shadow:0 8px 24px rgba(0,0,0,.45);";
   const entries = [[t("queue.copy_uid"), () => {
-    navigator.clipboard.writeText(item.uid).then(() => setStatus("status.copied")).catch(() => {});
+    copyText(item.uid).then(() => setStatus("status.copied"));
   }], [t("queue.open_web"), () => {
     if (window.pywebview && window.pywebview.api) window.pywebview.api.open_url(item.url);
   }]];
   if (item.status === "error") {
+    entries.push([t("queue.copy_error"), () => {
+      copyText(item.errorDetail || item.subText || "").then(() => setStatus("status.copied_text"));
+    }]);
     entries.push([t("queue.retry"), () => {
       item.status = "queued"; item.statusKey = "status.queued"; item.subKey = null; item.subText = "";
       renderQueue(); updateCounters();
@@ -628,6 +661,7 @@ function startQueueDownload() {
     autoOpen: autoOpen,
     downloadTextures: document.getElementById("chkDownloadTextures").checked,
     keepMaterials: document.getElementById("chkFormatMaterials").checked,
+    apiToken: document.getElementById("inpApiToken").value.trim(),
     format: document.getElementById("selFormat").value,
     converter: document.getElementById("selConverter").value
   };
@@ -669,6 +703,7 @@ window.onQueueProgress = function(data) {
       item.subText = data.subText;
     }
     item.percent = data.percent !== undefined ? data.percent : item.percent;
+    if (data.errorDetail) item.errorDetail = data.errorDetail;
     if (data.name) item.name = data.name;
     if (data.path) item.path = data.path;
   }

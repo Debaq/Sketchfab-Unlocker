@@ -206,6 +206,18 @@
           <option value="en">English</option>
           <option value="ru">Русский</option>
         </select>
+        <span class="section-label" data-i18n="settings.api_token">Token de API de Sketchfab (opcional)</span>
+        <div class="input-password-wrapper">
+          <input type="password" id="inpApiToken" class="dark-input" placeholder="" spellcheck="false" autocomplete="off" data-i18n-placeholder="settings.api_token_ph">
+          <button class="btn-toggle-eye" id="btnToggleTokenEye" type="button">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+              <circle cx="12" cy="12" r="3"></circle>
+            </svg>
+          </button>
+        </div>
+        <span class="checkbox-subtext" data-i18n="settings.api_token_help">Con token, los modelos descargables se bajan como archivo oficial (texturas originales).</span>
+        <button class="btn-secondary" id="btnTokenHelp" type="button" data-i18n="settings.api_token_link">Dónde conseguir el token (gratis)</button>
         <span class="section-label" data-i18n="settings.output_folder">Carpeta de salida</span>
         <div class="input-with-button">
           <input type="text" id="settingsPathInput" class="dark-input" value="" readonly>

@@ -95,6 +95,16 @@ def _run_cancellable(cmd: list[str], **kw: Any) -> "subprocess.CompletedProcess"
     if kw.pop("capture_output", False):
         kw["stdout"] = subprocess.PIPE
         kw["stderr"] = subprocess.PIPE
+    if getattr(sys, "frozen", False) and not sys.platform.startswith("win"):
+        # PyInstaller points LD_LIBRARY_PATH at its bundled libs (libssl...); system tools
+        # we spawn (curl, node, wine) must use the system ones instead.
+        env = dict(kw.get("env") or os.environ)
+        orig = env.get("LD_LIBRARY_PATH_ORIG")
+        if orig is not None:
+            env["LD_LIBRARY_PATH"] = orig
+        else:
+            env.pop("LD_LIBRARY_PATH", None)
+        kw["env"] = env
     if not sys.platform.startswith("win"):
         kw["start_new_session"] = True  # own process group -> killpg kills wine/node children
     check_cancel()
@@ -1039,7 +1049,7 @@ def _osgconv_via_ascii_temp(work_dir: Path, model_name: str) -> Path:
     """
     import tempfile
 
-    out_name = f"{model_name}.gltf"
+    out_name = "osgconv_out.gltf"
     needed = ["file.osgjs", "model_file.bin", "model_file_wireframe.bin"]
     with tempfile.TemporaryDirectory(prefix="sfosg_") as tmp:
         tmp_path = Path(tmp)
@@ -1058,7 +1068,7 @@ def _osgconv_via_ascii_temp(work_dir: Path, model_name: str) -> Path:
             if not gltfs:
                 raise RuntimeError("osgconv produced no glTF in temp dir")
             produced = gltfs[0]
-        dest = work_dir / produced.name
+        dest = work_dir / (f"{model_name}.gltf" if produced.name == out_name else produced.name)
         shutil.copy2(produced, dest)
         # copy sidecar bins if any
         for side in tmp_path.glob("*.bin"):
@@ -1102,7 +1112,11 @@ def convert_to_model(
     if use_osgconv:
         try:
             _progress("step:convert")
-            _run_osgconv(work_dir, osgjs.name, out_gltf.name)
+            # osgconv under Wine mangles non-ASCII output names: write ASCII, rename after
+            _run_osgconv(work_dir, osgjs.name, "osgconv_out.gltf")
+            _tmp_out = work_dir / "osgconv_out.gltf"
+            if _tmp_out.is_file():
+                _tmp_out.replace(out_gltf)
             if out_gltf.is_file() and out_gltf.stat().st_size > 0:
                 _progress(f"step:export|{out_gltf.name}|{out_gltf.stat().st_size}")
                 return out_gltf
@@ -1227,6 +1241,73 @@ def _strip_html(text: str) -> str:
     return text.strip()
 
 
+class _OfficialUnavailable(Exception):
+    """The official download can't be used (no permission, not downloadable, bad token...)."""
+
+
+def _download_official(uid: str, token: str, out_dir: Path, model_name: str, fmt: str) -> Path:
+    """
+    Official Sketchfab download (needs the user's own free API token and a model whose
+    author allows downloads). Returns the model path (glTF, or GLB if fmt == "glb").
+    Raises _OfficialUnavailable when the API refuses; other errors propagate.
+    """
+    import io
+    import zipfile
+
+    import requests
+
+    check_cancel()
+    headers = {"Authorization": f"Token {token.strip()}", "User-Agent": USER_AGENT}
+    try:
+        resp = requests.get(
+            f"https://api.sketchfab.com/v3/models/{uid}/download",
+            headers=headers,
+            proxies=_proxy_dict(),
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        raise _OfficialUnavailable(f"network: {e}") from e
+    if resp.status_code in (401, 403):
+        raise _OfficialUnavailable(f"HTTP {resp.status_code} (token invalid or download not allowed)")
+    if resp.status_code == 404:
+        raise _OfficialUnavailable("HTTP 404 (not downloadable)")
+    if resp.status_code != 200:
+        raise _OfficialUnavailable(f"HTTP {resp.status_code}")
+    info = (resp.json() or {}).get("gltf") or {}
+    url = info.get("url")
+    if not url:
+        raise _OfficialUnavailable("no glTF in the download response")
+
+    _progress("step:official_download")
+    buf = io.BytesIO()
+    try:
+        with requests.get(url, stream=True, proxies=_proxy_dict(), timeout=60) as r:
+            r.raise_for_status()
+            for chunk in r.iter_content(1 << 16):
+                check_cancel()
+                buf.write(chunk)
+    except requests.RequestException as e:
+        raise _OfficialUnavailable(f"download failed: {e}") from e
+
+    root = out_dir.resolve()
+    with zipfile.ZipFile(buf) as zf:
+        for member in zf.infolist():
+            target = (root / member.filename).resolve()
+            if root != target and root not in target.parents:
+                raise RuntimeError(f"unsafe path in zip: {member.filename}")  # zip-slip guard
+        zf.extractall(root)
+
+    gltfs = sorted(out_dir.glob("*.gltf"), key=lambda p: p.stat().st_size, reverse=True)
+    if not gltfs:
+        raise _OfficialUnavailable("zip had no .gltf")
+    model_path = out_dir / f"{model_name}.gltf"
+    if gltfs[0] != model_path:
+        gltfs[0].replace(model_path)
+    if fmt.lower() == "glb":
+        model_path = gltf_to_glb(model_path)
+    return model_path
+
+
 class _SkipStep(Exception):
     """Internal: optional pipeline step disabled by the caller."""
 
@@ -1312,9 +1393,13 @@ def download_one(
     keep_materials: bool = True,
     fmt: str = "gltf",
     converter: str = "auto",
+    api_token: Optional[str] = None,
 ) -> dict:
     """
     Download a single Sketchfab model (geometry only).
+
+    api_token: optional user API token; downloadable models are then fetched through
+    the official download (original textures). Falls back to the viewer method.
 
     fmt: "gltf" (separate files) or "glb" (single binary file).
 
@@ -1346,6 +1431,42 @@ def download_one(
         if out_dir.exists():
             shutil.rmtree(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
+
+        if api_token and api_token.strip():
+            try:
+                _progress("step:official")
+                model_path = _download_official(uid, api_token, out_dir, model_name, fmt)
+                meta = {
+                    "uid": uid,
+                    "name": display_name,
+                    "file_name": model_name,
+                    "author": author,
+                    "description": description,
+                    "source_url": url.strip(),
+                    "output": str(model_path),
+                    "format": model_path.suffix.lower().lstrip("."),
+                    "textures": len(list((out_dir / "textures").glob("*"))) if (out_dir / "textures").is_dir() else 0,
+                    "note": "Official Sketchfab download (API token)",
+                }
+                (out_dir / "info.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+                _progress("step:done")
+                return {
+                    "path": model_path,
+                    "dir": out_dir,
+                    "uid": uid,
+                    "name": display_name,
+                    "file_name": model_name,
+                    "author": author,
+                    "description": description,
+                    "source_url": url.strip(),
+                }
+            except _OfficialUnavailable as e:
+                _progress(f"step:official_unavailable|{e}")
+                for p in list(out_dir.iterdir()):
+                    if p.is_dir():
+                        shutil.rmtree(p, ignore_errors=True)
+                    else:
+                        p.unlink(missing_ok=True)
 
         new_format = is_new_binz_format(viewer_info)
         _progress(f"step:format|{'binz' if new_format else 'legacy'}")

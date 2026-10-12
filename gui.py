@@ -20,6 +20,22 @@ import main
 
 
 SETTINGS_FILE = CURRENT_DIR / "settings.json"
+LOG_FILE = CURRENT_DIR / "sketchfab-unlocker.log"
+
+
+def log_error(context: str) -> str:
+    """Write the current exception (with traceback) to the log file and stderr; return the text."""
+    import datetime
+    import traceback
+
+    text = traceback.format_exc()
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as fh:
+            fh.write(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {context}\n{text}\n")
+    except OSError:
+        pass
+    print(text, file=sys.stderr)
+    return text
 SUPPORTED_LANGS = ("es", "en", "ru")
 DEFAULT_LANG = "es"
 
@@ -127,6 +143,19 @@ class Api:
         except Exception:
             pass
 
+    def copy_to_clipboard(self, text: str) -> bool:
+        try:
+            import tkinter as tk
+            root = tk.Tk()
+            root.withdraw()
+            root.clipboard_clear()
+            root.clipboard_append(text)
+            root.update()
+            root.destroy()
+            return True
+        except Exception:
+            return False
+
     def get_clipboard(self) -> str:
         try:
             import tkinter as tk
@@ -224,6 +253,7 @@ class Api:
         download_tex = payload.get("downloadTextures", True)
         keep_materials = payload.get("keepMaterials", True)
         fmt = str(payload.get("format", "glTF")).lower()
+        api_token = str(payload.get("apiToken") or "").strip() or None
         converter = payload.get("converter", "auto")
         if converter not in ("auto", "osgconv", "python"):
             converter = "auto"
@@ -266,7 +296,13 @@ class Api:
                                 self._send_js("onQueueProgress", {"id": i_id, "uid": u, "name": parts[1][:60]})
                         pct = 10
                         msg = "step.default"
-                        if "step:viewer" in token:
+                        if "step:official_unavailable" in token:
+                            pct, msg = 15, "step.official_unavailable"
+                        elif "step:official_download" in token:
+                            pct, msg = 60, "step.official_download"
+                        elif "step:official" in token:
+                            pct, msg = 12, "step.official"
+                        elif "step:viewer" in token:
                             pct, msg = 20, "step.viewer"
                         elif "step:model" in token:
                             pct, msg = 30, "step.model"
@@ -304,6 +340,7 @@ class Api:
                         keep_materials=keep_materials,
                         fmt=fmt,
                         converter=converter,
+                        api_token=api_token,
                     )
                     success_count += 1
                     res_path = Path(res.get("dir") or Path(res["path"]).parent)
@@ -332,10 +369,12 @@ class Api:
                     })
                     continue
                 except Exception as e:
+                    detail = log_error(f"download {url}")
                     self._send_js("onQueueProgress", {
                         "id": item_id,
                         "uid": uid,
                         "status": "error",
+                        "errorDetail": f"{url}\n{detail}",
                         "statusKey": "status.error",
                         "subText": str(e).strip().splitlines()[-1][:90] if str(e).strip() else type(e).__name__,
                         "percent": 0
