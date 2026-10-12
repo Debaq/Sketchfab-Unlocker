@@ -19,6 +19,18 @@ if str(CURRENT_DIR) not in sys.path:
 import main
 
 
+SETTINGS_FILE = CURRENT_DIR / "settings.json"
+SUPPORTED_LANGS = ("es", "en", "ru")
+DEFAULT_LANG = "es"
+
+
+def load_settings() -> dict[str, Any]:
+    try:
+        return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 class Api:
     def __init__(self):
         self.window = None
@@ -33,9 +45,36 @@ class Api:
         worker, wasm_file = main._wasm_decrypt_paths()
         return {
             "default_output_dir": str(main.DOWNLOADS),
+            "language": load_settings().get("language", DEFAULT_LANG),
+            "settings": load_settings().get("ui", {}),
             "node_ready": bool(node_path),
             "wasm_ready": bool(worker and wasm_file),
         }
+
+    def set_language(self, lang: str) -> bool:
+        if lang not in SUPPORTED_LANGS:
+            return False
+        try:
+            data = load_settings()
+            data["language"] = lang
+            SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            return True
+        except Exception:
+            return False
+
+    def save_settings(self, ui: dict[str, Any]) -> bool:
+        try:
+            data = load_settings()
+            data["ui"] = ui
+            SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            return True
+        except Exception:
+            return False
+
+    def open_url(self, url: str) -> None:
+        import webbrowser
+        if str(url).startswith(("http://", "https://")):
+            webbrowser.open(url)
 
     def select_folder(self, initial_dir: str = "") -> Optional[str]:
         chosen = None
@@ -112,9 +151,9 @@ class Api:
                         total_bytes = sum(f.stat().st_size for f in folder.rglob("*") if f.is_file())
                         file_count = sum(1 for f in folder.rglob("*") if f.is_file())
                         if total_bytes >= 1024 * 1024:
-                            size_str = f"{total_bytes / (1024 * 1024):.1f} МБ"
+                            size_str = f"{total_bytes / (1024 * 1024):.1f} MB"
                         else:
-                            size_str = f"{max(1, total_bytes // 1024)} КБ"
+                            size_str = f"{max(1, total_bytes // 1024)} KB"
                         res.append({
                             "name": folder.name,
                             "path": str(folder),
@@ -129,25 +168,29 @@ class Api:
 
     def test_proxy(self, data: dict[str, Any]) -> dict[str, Any]:
         try:
-            import urllib.request
+            import requests
             ptype = str(data.get("type", "SOCKS5")).lower()
+            if ptype == "socks5":
+                ptype = "socks5h"
             host = str(data.get("host", "")).strip()
             port = str(data.get("port", "")).strip()
             user = str(data.get("user", "")).strip()
             pw = str(data.get("pass", "")).strip()
             if not host or not port:
-                return {"success": False, "error": "Не указан host или port"}
+                return {"success": False, "errorKey": "err.no_host"}
             auth = f"{user}:{pw}@" if user and pw else ""
             proxy_url = f"{ptype}://{auth}{host}:{port}"
-            req = urllib.request.Request("https://sketchfab.com", headers={"User-Agent": main.USER_AGENT})
-            handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-            opener = urllib.request.build_opener(handler)
-            resp = opener.open(req, timeout=6)
-            if resp.status in (200, 301, 302):
+            resp = requests.get(
+                "https://sketchfab.com",
+                headers={"User-Agent": main.USER_AGENT},
+                proxies={"http": proxy_url, "https": proxy_url},
+                timeout=8,
+            )
+            if resp.status_code < 400:
                 return {"success": True}
-            return {"success": False, "error": f"HTTP {resp.status}"}
+            return {"success": False, "error": f"HTTP {resp.status_code}"}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": str(e)[:120]}
 
     def minimize_window(self) -> None:
         if self.window:
@@ -163,11 +206,14 @@ class Api:
                 self._is_maximized = True
 
     def close_window(self) -> None:
+        self._cancel_flag = True
+        main.request_cancel()
         if self.window:
             self.window.destroy()
 
     def cancel_queue(self) -> None:
         self._cancel_flag = True
+        main.request_cancel()
 
     def start_queue(self, payload: dict[str, Any]) -> None:
         items = payload.get("items", [])
@@ -175,7 +221,14 @@ class Api:
         clean_output = payload.get("cleanOutput", True)
         proxy = payload.get("proxy")
         auto_open = payload.get("autoOpen", False)
+        download_tex = payload.get("downloadTextures", True)
+        keep_materials = payload.get("keepMaterials", True)
+        fmt = str(payload.get("format", "glTF")).lower()
+        converter = payload.get("converter", "auto")
+        if converter not in ("auto", "osgconv", "python"):
+            converter = "auto"
         self._cancel_flag = False
+        main.clear_cancel()
 
         def worker():
             out_dir = Path(save_path) if save_path else main.DOWNLOADS
@@ -185,7 +238,12 @@ class Api:
 
             for idx, item in enumerate(items):
                 if self._cancel_flag:
-                    break
+                    self._send_js("onQueueProgress", {
+                        "id": item.get("id"), "uid": item.get("uid"),
+                        "status": "queued", "statusKey": "status.queued",
+                        "subText": "", "percent": 0
+                    })
+                    continue
                 item_id = item.get("id")
                 uid = item.get("uid")
                 url = item.get("url") or f"https://sketchfab.com/3d-models/{uid}"
@@ -194,37 +252,43 @@ class Api:
                     "id": item_id,
                     "uid": uid,
                     "status": "downloading",
-                    "statusText": "Подготовка...",
-                    "subText": f"[{idx + 1}/{total}] Инициализация...",
+                    "statusKey": "status.preparing",
+                    "subKey": "status.initializing",
+                    "subParams": {"n": idx + 1, "total": total},
                     "percent": 5
                 })
 
                 def make_progress(i_id=item_id, u=uid):
                     def cb(token):
+                        if token.startswith("step:model|"):
+                            parts = token.split("|")
+                            if len(parts) > 1 and parts[1]:
+                                self._send_js("onQueueProgress", {"id": i_id, "uid": u, "name": parts[1][:60]})
                         pct = 10
-                        msg = "Загрузка..."
+                        msg = "step.default"
                         if "step:viewer" in token:
-                            pct, msg = 20, "Чтение метаданных..."
+                            pct, msg = 20, "step.viewer"
                         elif "step:model" in token:
-                            pct, msg = 30, "Модель обнаружена"
+                            pct, msg = 30, "step.model"
                         elif "step:keys" in token:
-                            pct, msg = 45, "Получение ключей..."
+                            pct, msg = 45, "step.keys"
                         elif "step:mesh" in token:
-                            pct, msg = 65, "Загрузка геометрии..."
+                            pct, msg = 65, "step.mesh"
                         elif "step:decrypt" in token:
-                            pct, msg = 78, "Расшифровка..."
+                            pct, msg = 78, "step.decrypt"
                         elif "step:textures" in token:
-                            pct, msg = 88, "Загрузка текстур..."
+                            pct, msg = 88, "step.textures"
                         elif "step:export" in token:
-                            pct, msg = 95, "Экспорт glTF..."
+                            pct, msg = 95, "step.export"
                         elif "step:done" in token:
-                            pct, msg = 100, "Готово"
+                            pct, msg = 100, "step.done"
                         self._send_js("onQueueProgress", {
                             "id": i_id,
                             "uid": u,
                             "status": "downloading",
-                            "statusText": f"Загрузка... {pct}%",
-                            "subText": msg,
+                            "statusKey": "status.downloading_pct",
+                            "statusParams": {"pct": pct},
+                            "subKey": msg,
                             "percent": pct
                         })
                     return cb
@@ -235,33 +299,45 @@ class Api:
                         out_root=out_dir,
                         proxy=proxy,
                         progress=make_progress(item_id, uid),
-                        clean_output=clean_output
+                        clean_output=clean_output,
+                        download_tex=download_tex,
+                        keep_materials=keep_materials,
+                        fmt=fmt,
+                        converter=converter,
                     )
                     success_count += 1
-                    res_path = Path(res["path"])
+                    res_path = Path(res.get("dir") or Path(res["path"]).parent)
                     folder_bytes = sum(f.stat().st_size for f in res_path.rglob("*") if f.is_file())
                     folder_files = sum(1 for f in res_path.rglob("*") if f.is_file())
                     if folder_bytes >= 1024 * 1024:
-                        size_text = f"{folder_bytes / (1024 * 1024):.1f} МБ"
+                        size_text = f"{folder_bytes / (1024 * 1024):.1f} MB"
                     else:
-                        size_text = f"{max(1, folder_bytes // 1024)} КБ"
+                        size_text = f"{max(1, folder_bytes // 1024)} KB"
                     self._send_js("onQueueProgress", {
                         "id": item_id,
                         "uid": uid,
                         "status": "done",
-                        "statusText": "Готово",
-                        "subText": f"{size_text} · {folder_files} файла",
+                        "statusKey": "status.done",
+                        "subKey": "status.done_sub",
+                        "subParams": {"size": size_text, "count": folder_files},
                         "percent": 100,
                         "name": res.get("name") or res_path.name,
                         "path": str(res_path)
                     })
+                except main.Cancelled:
+                    self._send_js("onQueueProgress", {
+                        "id": item_id, "uid": uid,
+                        "status": "queued", "statusKey": "status.queued",
+                        "subText": "", "percent": 0
+                    })
+                    continue
                 except Exception as e:
                     self._send_js("onQueueProgress", {
                         "id": item_id,
                         "uid": uid,
                         "status": "error",
-                        "statusText": "Ошибка",
-                        "subText": str(e)[:45],
+                        "statusKey": "status.error",
+                        "subText": str(e).strip().splitlines()[-1][:90] if str(e).strip() else type(e).__name__,
                         "percent": 0
                     })
 
@@ -269,7 +345,9 @@ class Api:
                 self.open_folder(str(out_dir))
 
             self._send_js("onQueueFinish", {
-                "message": f"Готово! Успешно скачано {success_count} из {total}"
+                "cancelled": self._cancel_flag,
+                "messageKey": "status.cancelled" if self._cancel_flag else "status.finished",
+                "messageParams": {"ok": success_count, "total": total}
             })
 
         threading.Thread(target=worker, daemon=True).start()

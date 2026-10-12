@@ -25,6 +25,7 @@ import shutil
 import ssl
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -45,6 +46,73 @@ _CURRENT_PROXY: Optional[str] = None
 _PROGRESS_CB: Optional[Callable[[str], None]] = None
 
 
+class Cancelled(BaseException):
+    """Raised when the user interrupts a download.
+
+    Derives from BaseException so the many `except Exception` fallbacks in the
+    pipeline (osgconv -> python converter, textures, materials) don't swallow it.
+    """
+
+
+_CANCEL = threading.Event()
+
+
+def request_cancel() -> None:
+    _CANCEL.set()
+
+
+def clear_cancel() -> None:
+    _CANCEL.clear()
+
+
+def check_cancel() -> None:
+    if _CANCEL.is_set():
+        raise Cancelled()
+
+
+def _kill_tree(proc: "subprocess.Popen") -> None:
+    try:
+        if sys.platform.startswith("win"):
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,  # type: ignore[attr-defined]
+            )
+        else:
+            import signal
+
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def _run_cancellable(cmd: list[str], **kw: Any) -> "subprocess.CompletedProcess":
+    """subprocess.run() replacement that can be interrupted via request_cancel()."""
+    if kw.pop("capture_output", False):
+        kw["stdout"] = subprocess.PIPE
+        kw["stderr"] = subprocess.PIPE
+    if not sys.platform.startswith("win"):
+        kw["start_new_session"] = True  # own process group -> killpg kills wine/node children
+    check_cancel()
+    proc = subprocess.Popen(cmd, **kw)
+    while True:
+        try:
+            out, err = proc.communicate(timeout=0.2)
+            return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+        except subprocess.TimeoutExpired:
+            if _CANCEL.is_set():
+                _kill_tree(proc)
+                try:
+                    proc.communicate(timeout=5)
+                except Exception:
+                    pass
+                raise Cancelled()
+
+
 def set_proxy(proxy: Optional[str]) -> None:
     """http(s)://user:pass@host:port or socks5://… — None = direct."""
     global _CURRENT_PROXY
@@ -57,6 +125,7 @@ def set_progress_callback(cb: Optional[Callable[[str], None]]) -> None:
 
 
 def _progress(msg: str) -> None:
+    check_cancel()
     log(msg)
     if _PROGRESS_CB:
         try:
@@ -254,7 +323,7 @@ def _http_via_curl(url: str, timeout: int, dest: Optional[Path] = None) -> bytes
         if _CURRENT_PROXY:
             cmd.extend(["-x", _CURRENT_PROXY])
         cmd.append(url)
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = _run_cancellable(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             err = (proc.stderr or proc.stdout or "").strip()
             raise RuntimeError(f"curl exit {proc.returncode}: {err[:400]}")
@@ -285,6 +354,7 @@ def http_get_bytes(url: str, *, timeout: int = 180, label: str = "") -> bytes:
 
     for attempt in range(1, MAX_RETRIES + 1):
         for name, fn in backends:
+            check_cancel()
             try:
                 data = fn()
                 if attempt > 1 or name != "requests":
@@ -309,7 +379,9 @@ def http_get_bytes(url: str, *, timeout: int = 180, label: str = "") -> bytes:
             f"{type(last_err).__name__}: {last_err}"
         )
         log(f"    retry in {wait:.1f}s…")
-        time.sleep(wait)
+        for _ in range(int(wait / 0.2) + 1):
+            check_cancel()
+            time.sleep(0.2)
 
     raise RuntimeError(
         "Failed to download data due to a network/SSL error.\n"
@@ -665,7 +737,7 @@ def run_tool(cmd: list[str], cwd: Path) -> None:
                 prefix="sftool_err_", delete=False
             ) as fe:
                 out_path, err_path = fo.name, fe.name
-                proc = subprocess.run(
+                proc = _run_cancellable(
                     run_cmd,
                     cwd=str(cwd),
                     stdin=subprocess.DEVNULL,
@@ -685,10 +757,10 @@ def run_tool(cmd: list[str], cwd: Path) -> None:
                         pass
         if proc.returncode != 0:
             msg = (err or out or "").strip()
-            raise RuntimeError(f"Команда код {proc.returncode}:\n{msg[:900]}")
+            raise RuntimeError(f"Command failed with exit code {proc.returncode}:\n{msg[:900]}")
         return
 
-    proc = subprocess.run(
+    proc = _run_cancellable(
         run_cmd,
         cwd=str(cwd),
         capture_output=True,
@@ -701,7 +773,7 @@ def run_tool(cmd: list[str], cwd: Path) -> None:
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()
         # 0xC0000005 = 3221225477 = ACCESS_VIOLATION (common osgconv crash)
-        raise RuntimeError(f"Команда код {proc.returncode}:\n{err[:900]}")
+        raise RuntimeError(f"Command failed with exit code {proc.returncode}:\n{err[:900]}")
 
 
 def is_new_binz_format(viewer_info: dict) -> bool:
@@ -746,6 +818,19 @@ def download_model_files(viewer_info: dict, work_dir: Path, new_format: bool) ->
             raise
 
 
+def download_animations(uid: str, work_dir: Path) -> int:
+    """Keyframe files (<animation uid>.bin.gz) are not in viewer_info; the public API lists them."""
+    data = http_get_json(f"https://sketchfab.com/i/models/{uid}/animations")
+    n = 0
+    for item in data.get("results") or []:
+        url, a_uid = item.get("url"), item.get("uid")
+        if not url or not a_uid:
+            continue
+        download_file(url, work_dir / f"{a_uid}.bin.gz")
+        n += 1
+    return n
+
+
 def _wasm_decrypt_paths() -> tuple[Optional[Path], Optional[Path]]:
     """Return (node_script, wasm_file) if WASM decrypt tools are present."""
     if _WASM_WORKER.is_file() and _WASM_FILE.is_file() and _WASM_FILE.stat().st_size > 10_000:
@@ -786,7 +871,7 @@ def _decrypt_binz_wasm(work_dir: Path, key1: str, static_key: str) -> None:
 
     cmd = [node, str(worker), str(work_dir), f"@{key_file}", static]
     log(f"  $ node {worker.name} (WASM decrypt, key={static[:8]}…)")
-    proc = subprocess.run(
+    proc = _run_cancellable(
         cmd,
         cwd=str(work_dir),
         capture_output=True,
@@ -989,6 +1074,7 @@ def convert_to_model(
     *,
     texture_map: Optional[dict] = None,
     prefer: str = "gltf",
+    converter: str = "auto",
 ) -> Path:
     """
     Convert decrypted Sketchfab mesh to a Blender-friendly format.
@@ -1006,8 +1092,14 @@ def convert_to_model(
     out_gltf = work_dir / f"{model_name}.gltf"
     errors: list[str] = []
 
+    # converter: "auto" (osgconv if usable, else python), "python", "osgconv" (no fallback)
+    use_osgconv = converter != "python" and OSGCONV.is_file()
+    if use_osgconv and converter == "auto" and not sys.platform.startswith("win") and not _find_wine():
+        use_osgconv = False
+        _progress("step:convert_skip|wine not found")
+
     # --- 1) Direct osgconv (original recipe) ---
-    if OSGCONV.is_file():
+    if use_osgconv:
         try:
             _progress("step:convert")
             _run_osgconv(work_dir, osgjs.name, out_gltf.name)
@@ -1032,6 +1124,9 @@ def convert_to_model(
         except Exception as e:
             errors.append(f"osgconv-temp: {e}")
             _progress(f"step:convert_fail|{e}")
+
+    if converter == "osgconv":
+        raise RuntimeError("osgconv conversion failed:\n" + "\n".join(errors))
 
     # --- 3) Pure-Python glTF (viewer-accurate verts/indices; no weld hacks) ---
     try:
@@ -1132,6 +1227,80 @@ def _strip_html(text: str) -> str:
     return text.strip()
 
 
+class _SkipStep(Exception):
+    """Internal: optional pipeline step disabled by the caller."""
+
+
+def gltf_to_glb(gltf_path: Path) -> Path:
+    """Pack a .gltf with external buffers/images into one .glb; removes the source files."""
+    import base64
+    import mimetypes
+    import struct
+
+    doc = json.loads(gltf_path.read_text(encoding="utf-8"))
+    base = gltf_path.parent
+    blob = bytearray()
+    used: list[Path] = []
+
+    def pad() -> None:
+        while len(blob) % 4:
+            blob.append(0)
+
+    def read_uri(uri: str) -> tuple[bytes, Optional[Path]]:
+        if uri.startswith("data:"):
+            return base64.b64decode(uri.split(",", 1)[1]), None
+        from urllib.parse import unquote
+        f = base / unquote(uri)
+        return f.read_bytes(), f
+
+    # buffers -> single blob, remember offsets
+    offsets = []
+    for buf in doc.get("buffers", []):
+        data, f = read_uri(buf["uri"])
+        pad()
+        offsets.append(len(blob))
+        blob.extend(data)
+        if f:
+            used.append(f)
+    views = doc.setdefault("bufferViews", [])
+    for bv in views:
+        bv["byteOffset"] = bv.get("byteOffset", 0) + offsets[bv.get("buffer", 0)]
+        bv["buffer"] = 0
+
+    # images -> bufferViews
+    for img in doc.get("images", []):
+        uri = img.get("uri")
+        if not uri:
+            continue
+        data, f = read_uri(uri)
+        pad()
+        views.append({"buffer": 0, "byteOffset": len(blob), "byteLength": len(data)})
+        blob.extend(data)
+        img.pop("uri")
+        img["bufferView"] = len(views) - 1
+        img["mimeType"] = img.get("mimeType") or mimetypes.guess_type(uri)[0] or "image/png"
+    pad()
+    doc["buffers"] = [{"byteLength": len(blob)}]
+
+    js = json.dumps(doc, separators=(",", ":")).encode("utf-8")
+    js += b" " * (-len(js) % 4)
+    total = 12 + 8 + len(js) + 8 + len(blob)
+    out = gltf_path.with_suffix(".glb")
+    with open(out, "wb") as fh:
+        fh.write(struct.pack("<4sII", b"glTF", 2, total))
+        fh.write(struct.pack("<I4s", len(js), b"JSON") + js)
+        fh.write(struct.pack("<I4s", len(blob), b"BIN\x00") + bytes(blob))
+    gltf_path.unlink()
+    keep_bins = {"model_file.bin", "model_file_wireframe.bin"}
+    for f in used:
+        if f.name not in keep_bins and f.is_file():
+            try:
+                f.unlink()
+            except OSError:
+                pass
+    return out
+
+
 def download_one(
     url: str,
     *,
@@ -1139,9 +1308,15 @@ def download_one(
     proxy: Optional[str] = None,
     progress: Optional[Callable[[str], None]] = None,
     clean_output: bool = True,
+    download_tex: bool = True,
+    keep_materials: bool = True,
+    fmt: str = "gltf",
+    converter: str = "auto",
 ) -> dict:
     """
     Download a single Sketchfab model (geometry only).
+
+    fmt: "gltf" (separate files) or "glb" (single binary file).
 
     Returns dict:
       path, dir, uid, name, author, description, source_url
@@ -1153,6 +1328,7 @@ def download_one(
     if progress is not None:
         set_progress_callback(progress)
 
+    out_dir: Optional[Path] = None
     try:
         uid = extract_uid(url)
         # Progress tokens are machine-readable for bot i18n: "step:<key>" or "step:<key>|<args>"
@@ -1164,7 +1340,7 @@ def download_one(
         display_name = str(viewer_info.get("name") or model_name)
         _progress(f"step:model|{display_name}|{author}")
 
-        root = Path(out_root) if out_root else DOWNLOADS
+        root = Path(out_root).resolve() if out_root else DOWNLOADS
         root.mkdir(parents=True, exist_ok=True)
         out_dir = root / f"{model_name}-{uid[:8]}"
         if out_dir.exists():
@@ -1187,6 +1363,13 @@ def download_one(
         _progress("step:mesh")
         download_model_files(viewer_info, out_dir, new_format)
 
+        if viewer_info.get("animationCount"):
+            try:
+                _progress("step:animations")
+                download_animations(uid, out_dir)
+            except Exception as e:
+                _progress(f"step:animations_warn|{e}")
+
         if new_format:
             _progress("step:decrypt")
             decrypt_binz(out_dir, key1, key2, embed_html=embed_html)
@@ -1196,6 +1379,8 @@ def download_one(
         # Textures (public texture API — no Sketchfab login)
         tex_map: dict = {}
         try:
+            if not download_tex:
+                raise _SkipStep()
             from textures import download_textures
 
             _progress("step:textures")
@@ -1207,12 +1392,35 @@ def download_one(
                 download_file=download_file,
                 progress=_progress,
             )
+        except _SkipStep:
+            pass
         except Exception as e:
             _progress(f"step:textures_warn|{e}")
 
         model_path = convert_to_model(
-            out_dir, model_name, texture_map=tex_map, prefer="gltf"
+            out_dir, model_name, texture_map=tex_map, prefer="gltf", converter=converter
         )
+
+        # Link textures/colors into glTF materials (osgconv leaves them empty)
+        if keep_materials and model_path.suffix.lower() == ".gltf":
+            try:
+                from fix_materials import apply_sketchfab_materials, fetch_options
+
+                _progress("step:materials")
+                apply_sketchfab_materials(
+                    model_path,
+                    fetch_options(uid, http_get_json),
+                    osgjs=out_dir / "file.osgjs",
+                    log=log,
+                )
+            except Exception as e:
+                _progress(f"step:materials_warn|{e}")
+
+        if fmt.lower() == "glb" and model_path.suffix.lower() == ".gltf":
+            try:
+                model_path = gltf_to_glb(model_path)
+            except Exception as e:
+                _progress(f"step:glb_warn|{e}")
 
         if clean_output:
             final_keep = {
@@ -1288,6 +1496,10 @@ def download_one(
             "description": description,
             "source_url": url.strip(),
         }
+    except Cancelled:
+        if out_dir is not None:
+            shutil.rmtree(out_dir, ignore_errors=True)
+        raise
     finally:
         set_proxy(prev_proxy)
         set_progress_callback(prev_cb)
