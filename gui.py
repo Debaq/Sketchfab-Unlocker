@@ -255,6 +255,7 @@ class Api:
         download_tex = payload.get("downloadTextures", True)
         keep_materials = payload.get("keepMaterials", True)
         fmt = str(payload.get("format", "glTF")).lower()
+        api_token = str(payload.get("apiToken") or "").strip() or None
         converter = payload.get("converter", "auto")
         if converter not in ("auto", "osgconv", "python"):
             converter = "auto"
@@ -297,7 +298,13 @@ class Api:
                                 self._send_js("onQueueProgress", {"id": i_id, "uid": u, "name": parts[1][:60]})
                         pct = 10
                         msg = "step.default"
-                        if "step:viewer" in token:
+                        if "step:official_unavailable" in token:
+                            pct, msg = 15, "step.official_unavailable"
+                        elif "step:official_download" in token:
+                            pct, msg = 60, "step.official_download"
+                        elif "step:official" in token:
+                            pct, msg = 12, "step.official"
+                        elif "step:viewer" in token:
                             pct, msg = 20, "step.viewer"
                         elif "step:model" in token:
                             pct, msg = 30, "step.model"
@@ -335,6 +342,7 @@ class Api:
                         keep_materials=keep_materials,
                         fmt=fmt,
                         converter=converter,
+                        api_token=api_token,
                     )
                     success_count += 1
                     res_path = Path(res.get("dir") or Path(res["path"]).parent)

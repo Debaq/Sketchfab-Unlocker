@@ -1,6 +1,6 @@
 # Sketchfab Unlocker
 
-[![Version](https://img.shields.io/badge/version-2.1.2-indigo.svg)](https://github.com/wesiks/Sketchfab-Unlocker)
+[![Version](https://img.shields.io/badge/version-2.1.3-indigo.svg)](https://github.com/wesiks/Sketchfab-Unlocker)
 [![Author](https://img.shields.io/badge/author-wesiks-blue.svg)](https://github.com/wesiks)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](https://github.com/wesiks/Sketchfab-Unlocker)
 [![Interface](https://img.shields.io/badge/interface-GUI%20%7C%20CLI-success.svg)](https://github.com/wesiks/Sketchfab-Unlocker)
@@ -18,6 +18,12 @@
 - **Clean Output Mode** (automatically purges temporary decryption artifacts)  
 - Multi-platform CLI for Windows, Linux, and macOS  
 - Docker support for automated containerized environments  
+
+---
+
+## Official download with an API token (optional)
+
+For models whose author allows downloads, you can paste your own free Sketchfab API token in **Settings -> General**. Those models are then fetched through Sketchfab's official download (original textures, real materials). Models that aren't downloadable, or runs without a token, use the normal method. Get the token at <https://sketchfab.com/settings#password>; it is stored only in your local `settings.json`.
 
 ---
 

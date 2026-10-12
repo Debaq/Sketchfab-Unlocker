@@ -52,6 +52,7 @@ const SETTING_FIELDS = {
   proxyHost: ["inpProxyHost", "value"],
   proxyPort: ["inpProxyPort", "value"],
   proxyUser: ["inpProxyUser", "value"],
+  apiToken: ["inpApiToken", "value"],
 };
 
 function collectSettings() {
@@ -205,6 +206,14 @@ function setupSettingsSync() {
   const passInp = document.getElementById("inpProxyPass");
   eyeBtn.addEventListener("click", () => {
     passInp.type = passInp.type === "password" ? "text" : "password";
+  });
+
+  const tokenInp = document.getElementById("inpApiToken");
+  document.getElementById("btnToggleTokenEye").addEventListener("click", () => {
+    tokenInp.type = tokenInp.type === "password" ? "text" : "password";
+  });
+  document.getElementById("btnTokenHelp").addEventListener("click", () => {
+    if (window.pywebview && window.pywebview.api) window.pywebview.api.open_url("https://sketchfab.com/settings#password");
   });
 
   document.getElementById("btnTestProxy").addEventListener("click", () => {
@@ -653,6 +662,7 @@ function startQueueDownload() {
     autoOpen: autoOpen,
     downloadTextures: document.getElementById("chkDownloadTextures").checked,
     keepMaterials: document.getElementById("chkFormatMaterials").checked,
+    apiToken: document.getElementById("inpApiToken").value.trim(),
     format: document.getElementById("selFormat").value,
     converter: document.getElementById("selConverter").value
   };
