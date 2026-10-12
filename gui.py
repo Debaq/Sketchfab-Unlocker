@@ -19,7 +19,7 @@ if str(CURRENT_DIR) not in sys.path:
 import main
 
 
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.1.2"
 SETTINGS_FILE = CURRENT_DIR / "settings.json"
 LOG_FILE = CURRENT_DIR / "sketchfab-unlocker.log"
 
