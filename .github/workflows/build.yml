@@ -23,12 +23,10 @@ jobs:
           - name: linux
             os: ubuntu-22.04
             exe: SketchfabUnlocker
-            data_sep: ":"
             webview_extra: qt
           - name: windows
             os: windows-latest
             exe: SketchfabUnlocker.exe
-            data_sep: ";"
             webview_extra: ""
 
     steps:
@@ -60,15 +58,7 @@ jobs:
       - name: Build with PyInstaller
         shell: bash
         run: |
-          pyinstaller --noconfirm --clean --onefile \
-            --name SketchfabUnlocker \
-            ${{ matrix.name == 'windows' && '--windowed' || '' }} \
-            --add-data "ui${{ matrix.data_sep }}ui" \
-            --hidden-import osgjs_convert \
-            --hidden-import fix_materials \
-            --hidden-import textures \
-            --collect-submodules webview \
-            gui.py
+          pyinstaller --noconfirm --clean --distpath dist --workpath build packaging/SketchfabUnlocker.spec
           ls -la dist
 
       - name: Assemble package
