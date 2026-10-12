@@ -1,5 +1,7 @@
 const I18N = {
   es: {
+    "queue.copy_error": "Copiar error",
+    "status.copied_text": "Copiado",
     "settings.converter": "Conversor",
     "settings.conv_auto": "Automático",
     "settings.maximize": "Maximizar",
@@ -93,6 +95,8 @@ const I18N = {
     "err.no_host": "Falta host o port",
   },
   en: {
+    "queue.copy_error": "Copy error",
+    "status.copied_text": "Copied",
     "settings.converter": "Converter",
     "settings.conv_auto": "Automatic",
     "settings.maximize": "Maximize",
@@ -186,6 +190,8 @@ const I18N = {
     "err.no_host": "Host or port missing",
   },
   ru: {
+    "queue.copy_error": "Копировать ошибку",
+    "status.copied_text": "Скопировано",
     "settings.converter": "Конвертер",
     "settings.conv_auto": "Автоматически",
     "settings.maximize": "Развернуть",

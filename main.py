@@ -95,6 +95,16 @@ def _run_cancellable(cmd: list[str], **kw: Any) -> "subprocess.CompletedProcess"
     if kw.pop("capture_output", False):
         kw["stdout"] = subprocess.PIPE
         kw["stderr"] = subprocess.PIPE
+    if getattr(sys, "frozen", False) and not sys.platform.startswith("win"):
+        # PyInstaller points LD_LIBRARY_PATH at its bundled libs (libssl...); system tools
+        # we spawn (curl, node, wine) must use the system ones instead.
+        env = dict(kw.get("env") or os.environ)
+        orig = env.get("LD_LIBRARY_PATH_ORIG")
+        if orig is not None:
+            env["LD_LIBRARY_PATH"] = orig
+        else:
+            env.pop("LD_LIBRARY_PATH", None)
+        kw["env"] = env
     if not sys.platform.startswith("win"):
         kw["start_new_session"] = True  # own process group -> killpg kills wine/node children
     check_cancel()
@@ -1039,7 +1049,7 @@ def _osgconv_via_ascii_temp(work_dir: Path, model_name: str) -> Path:
     """
     import tempfile
 
-    out_name = f"{model_name}.gltf"
+    out_name = "osgconv_out.gltf"
     needed = ["file.osgjs", "model_file.bin", "model_file_wireframe.bin"]
     with tempfile.TemporaryDirectory(prefix="sfosg_") as tmp:
         tmp_path = Path(tmp)
@@ -1058,7 +1068,7 @@ def _osgconv_via_ascii_temp(work_dir: Path, model_name: str) -> Path:
             if not gltfs:
                 raise RuntimeError("osgconv produced no glTF in temp dir")
             produced = gltfs[0]
-        dest = work_dir / produced.name
+        dest = work_dir / (f"{model_name}.gltf" if produced.name == out_name else produced.name)
         shutil.copy2(produced, dest)
         # copy sidecar bins if any
         for side in tmp_path.glob("*.bin"):
@@ -1102,7 +1112,11 @@ def convert_to_model(
     if use_osgconv:
         try:
             _progress("step:convert")
-            _run_osgconv(work_dir, osgjs.name, out_gltf.name)
+            # osgconv under Wine mangles non-ASCII output names: write ASCII, rename after
+            _run_osgconv(work_dir, osgjs.name, "osgconv_out.gltf")
+            _tmp_out = work_dir / "osgconv_out.gltf"
+            if _tmp_out.is_file():
+                _tmp_out.replace(out_gltf)
             if out_gltf.is_file() and out_gltf.stat().st_size > 0:
                 _progress(f"step:export|{out_gltf.name}|{out_gltf.stat().st_size}")
                 return out_gltf

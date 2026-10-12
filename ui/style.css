@@ -933,6 +933,12 @@ input:checked + .slider:before {
   margin-top: 4px;
 }
 
+.item-subtext, .item-title, .item-uid, #bottomStatusMsg, .model-card-title, .model-card-info {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
 .titlebar {
   height: 36px;
   flex-shrink: 0;

@@ -21,6 +21,22 @@ import main
 
 APP_VERSION = "2.1.1"
 SETTINGS_FILE = CURRENT_DIR / "settings.json"
+LOG_FILE = CURRENT_DIR / "sketchfab-unlocker.log"
+
+
+def log_error(context: str) -> str:
+    """Write the current exception (with traceback) to the log file and stderr; return the text."""
+    import datetime
+    import traceback
+
+    text = traceback.format_exc()
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as fh:
+            fh.write(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {context}\n{text}\n")
+    except OSError:
+        pass
+    print(text, file=sys.stderr)
+    return text
 SUPPORTED_LANGS = ("es", "en", "ru")
 DEFAULT_LANG = "es"
 
@@ -128,6 +144,19 @@ class Api:
                 self.open_folder(folder_path)
         except Exception:
             pass
+
+    def copy_to_clipboard(self, text: str) -> bool:
+        try:
+            import tkinter as tk
+            root = tk.Tk()
+            root.withdraw()
+            root.clipboard_clear()
+            root.clipboard_append(text)
+            root.update()
+            root.destroy()
+            return True
+        except Exception:
+            return False
 
     def get_clipboard(self) -> str:
         try:
@@ -334,10 +363,12 @@ class Api:
                     })
                     continue
                 except Exception as e:
+                    detail = log_error(f"download {url}")
                     self._send_js("onQueueProgress", {
                         "id": item_id,
                         "uid": uid,
                         "status": "error",
+                        "errorDetail": f"{url}\n{detail}",
                         "statusKey": "status.error",
                         "subText": str(e).strip().splitlines()[-1][:90] if str(e).strip() else type(e).__name__,
                         "percent": 0
