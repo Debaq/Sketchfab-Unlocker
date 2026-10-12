@@ -19,6 +19,7 @@ document.addEventListener("DOMContentLoaded", () => {
 function applyInitialState(state) {
   if (!state) return;
   if (state.default_output_dir) setOutputDirectory(state.default_output_dir);
+  if (state.version) document.querySelector(".sidebar-version").textContent = "v" + state.version;
   if (state.settings) applySettings(state.settings);
   if (state.language) {
     document.getElementById("selLanguage").value = state.language;

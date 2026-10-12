@@ -19,6 +19,7 @@ if str(CURRENT_DIR) not in sys.path:
 import main
 
 
+APP_VERSION = "2.1.1"
 SETTINGS_FILE = CURRENT_DIR / "settings.json"
 SUPPORTED_LANGS = ("es", "en", "ru")
 DEFAULT_LANG = "es"
@@ -44,6 +45,7 @@ class Api:
         node_path = shutil.which("node") or shutil.which("nodejs")
         worker, wasm_file = main._wasm_decrypt_paths()
         return {
+            "version": APP_VERSION,
             "default_output_dir": str(main.DOWNLOADS),
             "language": load_settings().get("language", DEFAULT_LANG),
             "settings": load_settings().get("ui", {}),

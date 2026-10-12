@@ -1,6 +1,6 @@
 # Sketchfab Unlocker
 
-[![Version](https://img.shields.io/badge/version-2.0-indigo.svg)](https://github.com/wesiks/Sketchfab-Unlocker)
+[![Version](https://img.shields.io/badge/version-2.1.1-indigo.svg)](https://github.com/wesiks/Sketchfab-Unlocker)
 [![Author](https://img.shields.io/badge/author-wesiks-blue.svg)](https://github.com/wesiks)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](https://github.com/wesiks/Sketchfab-Unlocker)
 [![Interface](https://img.shields.io/badge/interface-GUI%20%7C%20CLI-success.svg)](https://github.com/wesiks/Sketchfab-Unlocker)
